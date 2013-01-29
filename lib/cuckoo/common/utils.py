@@ -90,6 +90,10 @@ def store_temp_file(filedata, filename):
 
     return tmp_file_path
 
+def get_analyses_dir(taskid):
+    hashdir = str(int(taskid / 1000)) + "k"
+    return os.path.join(os.path.join(CUCKOO_ROOT, "storage", "analyses"), hashdir, str(taskid))
+
 # xmlrpc + timeout - still a bit ugly - but at least gets rid of setdefaulttimeout
 # inspired by 
 # http://stackoverflow.com/questions/372365/set-timeout-for-xmlrpclib-serverproxy

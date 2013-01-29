@@ -24,7 +24,7 @@ sys.path.append(os.path.join(os.path.abspath(os.path.dirname(__file__)), ".."))
 
 from lib.cuckoo.core.database import Database
 from lib.cuckoo.common.constants import CUCKOO_ROOT
-from lib.cuckoo.common.utils import store_temp_file
+from lib.cuckoo.common.utils import store_temp_file, get_analyses_dir
 
 # Templating engine.
 env = Environment()
@@ -125,7 +125,7 @@ def view(task_id):
     if not task_id.isdigit():
         return HTTPError(code=404, output="The specified ID is invalid")
 
-    report_path = os.path.join(CUCKOO_ROOT, "storage", "analyses", task_id, "reports", "report.html")
+    report_path = os.path.join(get_analyses_dir(task_id), "reports", "report.html")
 
     if not os.path.exists(report_path):
         return HTTPError(code=404, output="Report not found")

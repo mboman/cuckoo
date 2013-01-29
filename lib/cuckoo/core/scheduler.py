@@ -16,7 +16,7 @@ from lib.cuckoo.common.exceptions import CuckooOperationalError
 from lib.cuckoo.common.exceptions import CuckooCriticalError
 from lib.cuckoo.common.abstracts import  MachineManager
 from lib.cuckoo.common.objects import Dictionary, File
-from lib.cuckoo.common.utils import  create_folders, create_folder
+from lib.cuckoo.common.utils import  create_folders, create_folder, get_analyses_dir
 from lib.cuckoo.common.config import Config
 from lib.cuckoo.core.database import Database
 from lib.cuckoo.core.guest import GuestManager
@@ -51,10 +51,7 @@ class AnalysisManager(Thread):
 
     def init_storage(self):
         """Initialize analysis storage folder."""
-        self.storage = os.path.join(CUCKOO_ROOT,
-                                    "storage",
-                                    "analyses",
-                                    str(self.task.id))
+        self.storage = get_analyses_dirs(self.task.id)
 
         # If the analysis storage folder already exists, we need to abort the
         # analysis or previous results will be overwritten and lost.
