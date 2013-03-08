@@ -51,7 +51,7 @@ class AnalysisManager(Thread):
 
     def init_storage(self):
         """Initialize analysis storage folder."""
-        self.storage = get_analyses_dirs(self.task.id)
+        self.storage = get_analyses_dir(self.task.id)
 
         # If the analysis storage folder already exists, we need to abort the
         # analysis or previous results will be overwritten and lost.

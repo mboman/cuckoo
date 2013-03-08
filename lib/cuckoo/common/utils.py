@@ -10,6 +10,7 @@ import xmlrpclib
 from datetime import datetime
 
 from lib.cuckoo.common.exceptions import CuckooOperationalError
+from lib.cuckoo.common.constants import CUCKOO_ROOT
 
 def create_folders(root=".", folders=[]):
     """Create directories.
@@ -77,7 +78,7 @@ def store_temp_file(filedata, filename):
     """
     filename = get_filename_from_path(filename)
 
-    tmppath = tempfile.gettempdir()
+    tmppath = os.path.join(os.path.join(CUCKOO_ROOT, "storage"))
     targetpath = os.path.join(tmppath, "cuckoo-tmp")
     if not os.path.exists(targetpath):
         os.mkdir(targetpath)
