@@ -41,6 +41,8 @@ class Pcap:
     """Reads network data from PCAP file."""
     ssl_ports = 443,
 
+    notified_dpkt = False
+
     def __init__(self, filepath):
         """Creates a new instance.
         @param filepath: path to PCAP file
@@ -134,6 +136,10 @@ class Pcap:
         @param connection: connection data
         """
         try:
+            # TODO: Perhaps this block should be removed.
+            # If there is a packet from a non-local IP address, which hasn't
+            # been seen before, it means that the connection wasn't initiated
+            # during the time of the current analysis.
             if connection["src"] not in self.hosts:
                 ip = convert_to_printable(connection["src"])
 
@@ -425,6 +431,14 @@ class Pcap:
     def _https_identify(self, conn, data):
         """Extract a combination of the Session ID, Client Random, and Server
         Random in order to identify the accompanying master secret later."""
+        if not hasattr(dpkt.ssl, "TLSRecord"):
+            if not Pcap.notified_dpkt:
+                Pcap.notified_dpkt = True
+                log.warning("Using an old version of dpkt that does not "
+                            "support TLS streams (install the latest with "
+                            "`pip install dpkt`)")
+            return
+
         try:
             record = dpkt.ssl.TLSRecord(data)
         except dpkt.NeedData:
@@ -440,7 +454,6 @@ class Pcap:
         try:
             record = dpkt.ssl.RECORD_TYPES[record.type](record.data)
         except dpkt.ssl.SSL3Exception:
-            log.exception("Error reading possible TLS Handshake record")
             return
         except dpkt.NeedData:
             log.exception("Incomplete possible TLS Handshake record found")
@@ -696,6 +709,7 @@ def batch_sort(input_iterator, output_path, buffer_size=32000, output_class=None
             current_chunk = list(islice(input_iterator, buffer_size))
             if not current_chunk:
                 break
+
             current_chunk.sort()
             fd, filepath = tempfile.mkstemp()
             os.close(fd)
@@ -718,7 +732,6 @@ def batch_sort(input_iterator, output_path, buffer_size=32000, output_class=None
             except Exception:
                 pass
 
-# magic
 class SortCap(object):
     """SortCap is a wrapper around the packet lib (dpkt) that allows us to sort pcaps
     together with the batch_sort function above."""
@@ -751,6 +764,7 @@ class SortCap(object):
         rp = next(self.fditer)
         if rp is None:
             return None
+
         self.ctr += 1
 
         ts, raw = rp

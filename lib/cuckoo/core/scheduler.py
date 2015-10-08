@@ -6,8 +6,8 @@ import os
 import time
 import shutil
 import logging
+import threading
 import Queue
-from threading import Thread, Lock
 
 from lib.cuckoo.common.config import Config
 from lib.cuckoo.common.constants import CUCKOO_ROOT
@@ -25,8 +25,8 @@ from lib.cuckoo.core.resultserver import ResultServer
 log = logging.getLogger(__name__)
 
 machinery = None
-machine_lock = Lock()
-latest_symlink_lock = Lock()
+machine_lock = None
+latest_symlink_lock = threading.Lock()
 
 active_analysis_count = 0
 
@@ -40,7 +40,7 @@ class CuckooDeadMachine(Exception):
     pass
 
 
-class AnalysisManager(Thread):
+class AnalysisManager(threading.Thread):
     """Analysis Manager.
 
     This class handles the full analysis process for a given task. It takes
@@ -51,8 +51,7 @@ class AnalysisManager(Thread):
 
     def __init__(self, task, error_queue):
         """@param task: task object containing the details for the analysis."""
-        Thread.__init__(self)
-        Thread.daemon = True
+        threading.Thread.__init__(self)
 
         self.task = task
         self.errors = error_queue
@@ -167,16 +166,14 @@ class AnalysisManager(Thread):
 
             # If the user specified a specific machine ID, a platform to be
             # used or machine tags acquire the machine accordingly.
-            try:
-                machine = machinery.acquire(machine_id=self.task.machine,
-                                            platform=self.task.platform,
-                                            tags=self.task.tags)
-            finally:
-                machine_lock.release()
+            machine = machinery.acquire(machine_id=self.task.machine,
+                                        platform=self.task.platform,
+                                        tags=self.task.tags)
 
             # If no machine is available at this moment, wait for one second
             # and try again.
             if not machine:
+                machine_lock.release()
                 log.debug("Task #%d: no machine available yet", self.task.id)
                 time.sleep(1)
             else:
@@ -191,6 +188,15 @@ class AnalysisManager(Thread):
         @return: options dict.
         """
         options = {}
+
+        if self.task.category == "file":
+            options["file_name"] = File(self.task.target).get_name()
+            options["file_type"] = File(self.task.target).get_type()
+            options["pe_exports"] = \
+                ",".join(File(self.task.target).get_exported_functions())
+
+            package, activity = File(self.task.target).get_apk_entry()
+            self.task.options["apk_entry"] = "%s:%s" % (package, activity)
 
         options["id"] = self.task.id
         options["ip"] = self.machine.resultserver_ip
@@ -207,10 +213,6 @@ class AnalysisManager(Thread):
             options["timeout"] = self.cfg.timeouts.default
         else:
             options["timeout"] = self.task.timeout
-
-        if self.task.category == "file":
-            options["file_name"] = File(self.task.target).get_name()
-            options["file_type"] = File(self.task.target).get_type()
 
         # copy in other analyzer specific options, TEMPORARY (most likely)
         vm_options = getattr(machinery.options, self.machine.name)
@@ -246,6 +248,7 @@ class AnalysisManager(Thread):
         try:
             self.acquire_machine()
         except CuckooOperationalError as e:
+            machine_lock.release()
             log.error("Cannot acquire machine: {0}".format(e))
             return False
 
@@ -263,13 +266,20 @@ class AnalysisManager(Thread):
         options = self.build_options()
 
         try:
+            unlocked = False
+
             # Mark the selected analysis machine in the database as started.
             guest_log = self.db.guest_start(self.task.id,
                                             self.machine.name,
                                             self.machine.label,
                                             machinery.__class__.__name__)
             # Start the machine.
-            machinery.start(self.machine.label)
+            machinery.start(self.machine.label, self.task)
+
+            # By the time start returns it will have fully started the Virtual
+            # Machine. We can now safely release the machine lock.
+            machine_lock.release()
+            unlocked = True
 
             # Initialize the guest manager.
             guest = GuestManager(self.machine.name, self.machine.ip,
@@ -281,9 +291,13 @@ class AnalysisManager(Thread):
             guest.wait_for_completion()
             succeeded = True
         except CuckooMachineError as e:
+            if not unlocked:
+                machine_lock.release()
             log.error(str(e), extra={"task_id": self.task.id})
             dead_machine = True
         except CuckooGuestError as e:
+            if not unlocked:
+                machine_lock.release()
             log.error(str(e), extra={"task_id": self.task.id})
         finally:
             # Stop Auxiliary modules.
@@ -392,6 +406,12 @@ class AnalysisManager(Thread):
 
             self.db.set_status(self.task.id, TASK_COMPLETED)
 
+            # If the task is still available in the database, update our task
+            # variable with what's in the database, as otherwise we're missing
+            # out on the status and completed_on change. This would then in
+            # turn thrown an exception in the analysisinfo processing module.
+            self.task = self.db.view_task(self.task.id) or self.task
+
             log.debug("Released database task #%d with status %s",
                       self.task.id, success)
 
@@ -411,7 +431,9 @@ class AnalysisManager(Thread):
                 # Deal with race conditions using a lock.
                 latest_symlink_lock.acquire()
                 try:
-                    if os.path.exists(latest):
+                    # As per documentation, lexists() returns True for dead
+                    # symbolic links.
+                    if os.path.lexists(latest):
                         os.remove(latest)
 
                     os.symlink(self.storage, latest)
@@ -445,11 +467,21 @@ class Scheduler:
 
     def initialize(self):
         """Initialize the machine manager."""
-        global machinery
+        global machinery, machine_lock
 
         machinery_name = self.cfg.cuckoo.machinery
 
-        log.info("Using \"%s\" machine manager", machinery_name)
+        max_vmstartup_count = self.cfg.cuckoo.max_vmstartup_count
+        if max_vmstartup_count:
+            machine_lock = threading.Semaphore(max_vmstartup_count)
+        else:
+            machine_lock = threading.Lock()
+
+        log.info("Using \"%s\" machine manager with max_analysis_count=%d, "
+                 "max_machines_count=%d, and max_vmstartup_count=%d",
+                 machinery_name, self.cfg.cuckoo.max_analysis_count,
+                 self.cfg.cuckoo.max_machines_count,
+                 self.cfg.cuckoo.max_vmstartup_count)
 
         # Get registered class name. Only one machine manager is imported,
         # therefore there should be only one class in the list.
@@ -518,6 +550,16 @@ class Scheduler:
         while self.running:
             time.sleep(1)
 
+            # Wait until the machine lock is not locked. This is only the case
+            # when all machines are fully running, rather that about to start
+            # or still busy starting. This way we won't have race conditions
+            # with finding out there are no available machines in the analysis
+            # manager or having two analyses pick the same machine.
+            if not machine_lock.acquire(False):
+                continue
+
+            machine_lock.release()
+
             # If not enough free disk space is available, then we print an
             # error message and wait another round (this check is ignored
             # when the freespace configuration variable is set to zero).
@@ -556,20 +598,26 @@ class Scheduler:
                 if active_analysis_count <= 0:
                     log.debug("Reached max analysis count, exiting.")
                     self.stop()
-            else:
-                # Fetch a pending analysis task.
-                # TODO This fixes only submissions by --machine, need to add
-                # other attributes (tags etc).
-                for machine in self.db.get_available_machines():
+                continue
 
-                    task = self.db.fetch(machine=machine.name)
-                    if task:
-                        log.debug("Processing task #%s", task.id)
-                        self.total_analysis_count += 1
+            # Fetch a pending analysis task.
+            # TODO This fixes only submissions by --machine, need to add
+            # other attributes (tags etc).
+            # TODO We should probably move the entire "acquire machine" logic
+            # from the Analysis Manager to the Scheduler and then pass the
+            # selected machine onto the Analysis Manager instance.
+            for machine in self.db.get_available_machines():
 
-                        # Initialize and start the analysis manager.
-                        analysis = AnalysisManager(task, errors)
-                        analysis.start()
+                task = self.db.fetch(machine=machine.name)
+                if task:
+                    log.debug("Processing task #%s", task.id)
+                    self.total_analysis_count += 1
+
+                    # Initialize and start the analysis manager.
+                    analysis = AnalysisManager(task, errors)
+                    analysis.daemon = True
+                    analysis.start()
+                    break
 
             # Deal with errors.
             try:

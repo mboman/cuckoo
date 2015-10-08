@@ -19,17 +19,11 @@ If you want to use the Django-based web interface, you'll have to install MongoD
 
     $ sudo apt-get install mongodb
 
-In order to properly function, Cuckoo requires some dependencies. They can all be installed through PyPI like this:
+In order to properly function, Cuckoo requires some dependencies. They can all be installed through PyPI like this::
 
     $ sudo pip install -r requirements.txt
 
-To have MAEC support, you need to first install the Cybox and then the MAEC libraries::
-
-    $ sudo pip install cybox==2.1.0.9
-    $ sudo pip install maec==4.1.0.11
-
-[Yara](http://code.google.com/p/yara-project/) and [Pydeep](https://github.com/kbandla/pydeep)
-will have to beinstalled manually, so please refer to their websites.
+`Yara`_ and `Pydeep`_ will have to beinstalled manually, so please refer to their websites.
 
 If you want to use KVM it's packaged too and you can install it with the following command::
 
@@ -38,6 +32,9 @@ If you want to use KVM it's packaged too and you can install it with the followi
 If you want to use XenServer you'll have to install the *XenAPI* Python package::
 
     $ sudo pip install XenAPI
+
+.. _Yara: http://code.google.com/p/yara-project/
+.. _Pydeep: https://github.com/kbandla/pydeep
 
 Virtualization Software
 =======================

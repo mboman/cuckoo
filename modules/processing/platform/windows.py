@@ -169,9 +169,8 @@ class BehaviorReconstructor(object):
     # File stuff.
 
     def _api_NtCreateFile(self, return_value, arguments):
-        if NT_SUCCESS(return_value):
-            self.files[arguments["file_handle"]] = arguments["filepath"]
-            return ("file_opened", arguments["filepath"])
+        self.files[arguments["file_handle"]] = arguments["filepath"]
+        return ("file_opened", arguments["filepath"])
 
     _api_NtOpenFile = _api_NtCreateFile
 
@@ -222,8 +221,8 @@ class BehaviorReconstructor(object):
     def _api_URLDownloadToFileW(self, return_value, arguments):
         return [
             ("downloads_file", arguments["url"]),
-            ("file_opened", arguments["filepath"])
-            ("file_written", arguments["filepath"])
+            ("file_opened", arguments["filepath"]),
+            ("file_written", arguments["filepath"]),
         ]
 
     def _api_InternetConnectA(self, return_value, arguments):
@@ -252,6 +251,23 @@ class BehaviorReconstructor(object):
     # Mutex stuff
 
     def _api_NtCreateMutant(self, return_value, arguments):
-        return ("mutex", arguments["mutant_name"])
+        if arguments["mutant_name"]:
+            return ("mutex", arguments["mutant_name"])
 
     _api_ConnectEx = _api_connect
+
+    # Process stuff.
+
+    def _api_CreateProcessInternalW(self, return_value, arguments):
+        cmdline = arguments["command_line"] or arguments["filepath"]
+        return ("command_line", cmdline)
+
+    def _api_ShellExecuteExW(self, return_value, arguments):
+        if arguments["parameters"]:
+            cmdline = "%s %s" % (arguments["filepath"], arguments["parameters"])
+        else:
+            cmdline = arguments["filepath"]
+        return ("command_line", cmdline)
+
+    def _api_system(self, return_value, arguments):
+        return ("command_line", arguments["command"])

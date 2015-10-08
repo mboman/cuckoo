@@ -51,7 +51,7 @@ class AnalysisInfo(Processing):
         task = db.view_task(self.task["id"], details=True)
 
         if task and task.guest:
-            # Get machine description ad json.
+            # Get machine description.
             machine = task.guest.to_dict()
             # Remove useless task_id.
             del machine["task_id"]
@@ -66,6 +66,8 @@ class AnalysisInfo(Processing):
             id=int(self.task["id"]),
             category=self.task["category"],
             custom=self.task["custom"],
+            owner=self.task["owner"],
             machine=machine,
-            package=self.task["package"]
+            package=self.task["package"],
+            platform=self.task["platform"],
         )

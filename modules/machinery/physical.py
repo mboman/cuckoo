@@ -14,7 +14,6 @@ from lib.cuckoo.common.exceptions import CuckooMachineError
 
 log = logging.getLogger(__name__)
 
-
 class Physical(Machinery):
     """Manage physical sandboxes."""
 
@@ -47,9 +46,10 @@ class Physical(Machinery):
 
         raise CuckooMachineError("No machine with label: %s." % label)
 
-    def start(self, label):
+    def start(self, label, task):
         """Start a physical machine.
         @param label: physical machine name.
+        @param task: task object.
         @raise CuckooMachineError: if unable to start.
         """
         # Check to ensure a given machine is running

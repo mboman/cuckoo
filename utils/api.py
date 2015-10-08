@@ -248,8 +248,6 @@ def tasks_report(task_id, report_format="json"):
     formats = {
         "json": "report.json",
         "html": "report.html",
-        "maec": "report.maec-1.1.xml",
-        "metadata": "report.metadata.xml",
     }
 
     bz_formats = {
@@ -273,15 +271,16 @@ def tasks_report(task_id, report_format="json"):
                               "analyses", "%d" % task_id)
         s = StringIO()
 
-        # By default go for bz2 encoded tar files (for legacy reasons.)
+        # By default go for bz2 encoded tar files (for legacy reasons).
         tarmode = tar_formats.get(request.args.get("tar"), "w:bz2")
 
-        tar = tarfile.open(fileobj=s, mode=tarmode)
+        tar = tarfile.open(fileobj=s, mode=tarmode, dereference=True)
         for filedir in os.listdir(srcdir):
+            filepath = os.path.join(srcdir, filedir)
             if bzf["type"] == "-" and filedir not in bzf["files"]:
-                tar.add(os.path.join(srcdir, filedir), arcname=filedir)
+                tar.add(filepath, arcname=filedir)
             if bzf["type"] == "+" and filedir in bzf["files"]:
-                tar.add(os.path.join(srcdir, filedir), arcname=filedir)
+                tar.add(filepath, arcname=filedir)
         tar.close()
 
         response = make_response(s.getvalue())
@@ -422,6 +421,19 @@ def cuckoo_status():
     else:
         cpuload = []
 
+    if os.path.isfile("/proc/meminfo"):
+        values = {}
+        for line in open("/proc/meminfo"):
+            key, value = line.split(":", 1)
+            values[key.strip()] = value.replace("kB", "").strip()
+
+        if "MemAvailable" in values and "MemTotal" in values:
+            memory = 100.0 * int(values["MemFree"]) / int(values["MemTotal"])
+        else:
+            memory = None
+    else:
+        memory = None
+
     response = dict(
         version=CUCKOO_VERSION,
         hostname=socket.gethostname(),
@@ -438,9 +450,48 @@ def cuckoo_status():
         ),
         diskspace=diskspace,
         cpuload=cpuload,
+        memory=memory,
     )
 
     return jsonify(response)
+
+@app.route("/memory/list/<int:task_id>")
+def memorydumps_list(task_id):
+    folder_path = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task_id), "memory")
+
+    if os.path.exists(folder_path):
+        memory_files = []
+        memory_path = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task_id), "memory")
+        for subdir, dirs, files in os.walk(memory_path):
+            for filename in files:
+                memory_files.append(filename.replace(".dmp", ""))
+
+        if len(memory_files) == 0:
+            return json_error(404, "Memory dump not found")
+
+        return jsonify(memory_files)
+    else:
+        return json_error(404, "Memory dump not found")
+
+@app.route("/memory/get/<int:task_id>/<pid>")
+def memorydumps_get(task_id, pid=None):
+    folder_path = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task_id), "memory")
+
+    if os.path.exists(folder_path):
+        if pid:
+            pid_name = "{0}.dmp".format(pid)
+            pid_path = os.path.join(folder_path, pid_name)
+            if os.path.exists(pid_path):
+                response = make_response(open(pid_path, "rb").read())
+                response.headers["Content-Type"] = \
+                    "application/octet-stream; charset=UTF-8"
+                return response
+            else:
+                return json_error(404, "Memory dump not found")
+        else:
+            return json_error(404, "Memory dump not found")
+    else:
+        return json_error(404, "Memory dump not found")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

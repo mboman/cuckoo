@@ -17,6 +17,8 @@ CLEAN="0"
 DEPENDENCIES=""
 BASEDIR="/home/cuckoo"
 VMCHECKUP="0"
+LONGTERM="0"
+CPUCOUNT="1"
 
 usage() {
     echo "Usage: $0 [options...]"
@@ -34,6 +36,8 @@ usage() {
     echo "-d --dependencies: Dependencies to install in the Virtual Machine."
     echo "-b --basedir:      Base directory for Virtual Machine files."
     echo "-V --vms:          Only check Virtual Machines, don't re-setup."
+    echo "-l --longterm:     Indicate this is a longterm analysis setup."
+    echo "-u --cpucount:     Amount of CPUs per Virtual Machine."
     exit 1
 }
 
@@ -116,6 +120,15 @@ while [ "$#" -gt 0 ]; do
             VMCHECKUP="1"
             ;;
 
+        -l|--longterm)
+            LONGTERM="1"
+            ;;
+
+        -u|--cpucount)
+            CPUCOUNT="$1"
+            shift
+            ;;
+
         *)
             echo "$0: Invalid argument.. $1" >&2
             usage
@@ -154,6 +167,63 @@ if [ "$WIN7" -eq 0 ] && [ -z "$SERIALKEY" ]; then
     exit 1
 fi
 
+if [ "$TMPFS" -ne 0 ] && [ "$LONGTERM" -ne 0 ]; then
+    echo "It is not recommended to use tmpfs in a longterm setup."
+    echo "Please update your settings or remove this check."
+    exit 1
+fi
+
+if [ "$LONGTERM" -ne 0 ] && [ "$VMCOUNT" -ne 0 ]; then
+    echo "In longterm mode virtual machines should not be created through the"
+    echo "setup.sh script - this is handled by the vm cronjob."
+    exit 1
+fi
+
+_clone_cuckoo() {
+    local gitrepo=""
+
+    # Fetch Cuckoo or in the case of a longterm setup, longcuckoo.
+    if [ "$LONGTERM" -eq 0 ]; then
+        sudo -u cuckoo -i \
+            git clone --bare git://github.com/cuckoobox/cuckoo.git
+
+        gitrepo="cuckoo.git"
+    else
+        sudo -u cuckoo -i \
+            git clone --bare git://github.com/jbremer/longcuckoo.git
+
+        gitrepo="longcuckoo.git"
+    fi
+
+    sudo -u cuckoo -i tee "$gitrepo/hooks/post-receive" << EOF
+#!/bin/bash
+
+read commit
+
+if ! echo \$commit|grep production$; then
+    echo -e "\\e[31mWe only check out changes to the production branch.\\e[0m"
+    exit
+fi
+
+GIT_WORK_TREE=/opt/cuckoo git checkout -f production
+EOF
+
+    mkdir -p "/opt/cuckoo"
+    chown cuckoo:cuckoo "/opt/cuckoo"
+    chmod 755 "/home/cuckoo/" "/opt/cuckoo"
+    sudo -u cuckoo -i chmod +x "$gitrepo/hooks/post-receive"
+
+    # Checkout master branch of the repository (if this was not done already).
+    if [ -z "$(ls -A /opt/cuckoo)" ]; then
+        sudo -u cuckoo -i \
+            git --work-tree /opt/cuckoo --git-dir "$gitrepo" checkout -f master
+    fi
+
+    # Delete the cuckoo1 machine that is included in the VirtualBox
+    # configuration by default.
+    sudo -u cuckoo -i "/opt/cuckoo/utils/machine.py" --delete cuckoo1
+}
+
 _setup() {
     # All functionality related to setting up the machine - this is not
     # required when doing a Virtual Machine checkup.
@@ -162,7 +232,7 @@ _setup() {
     if [ ! -e /etc/apt/sources.list.d/virtualbox.list ]; then
         # Update our apt repository with VirtualBox "contrib".
         DEBVERSION="$(lsb_release -cs)"
-        echo "deb http://download.virtualbox.org/virtualbox/debian " \
+        echo "deb http://download.virtualbox.org/virtualbox/debian" \
             "$DEBVERSION contrib" >> /etc/apt/sources.list.d/virtualbox.list
 
         # Add the VirtualBox public key to our apt repository.
@@ -174,7 +244,8 @@ _setup() {
     apt-get update -y --force-yes
     apt-get install -y --force-yes sudo git python-dev python-pip postgresql \
         libpq-dev python-dpkt vim tcpdump libcap2-bin genisoimage pwgen \
-        htop tig mosh mongodb uwsgi uwsgi-plugin-python nginx virtualbox-4.3
+        htop tig mosh mongodb uwsgi uwsgi-plugin-python nginx virtualbox-4.3 \
+        libffi-dev
 
     # Create the main postgresql cluster. In recent versions of Ubuntu Server
     # 14.04 you have to do this manually. If it already exists this command
@@ -193,24 +264,32 @@ _setup() {
 
     # Setup a Cuckoo user.
     useradd cuckoo -d /home/cuckoo -s /bin/bash
+    mkdir -p /home/cuckoo
+    chown cuckoo:cuckoo /home/cuckoo
 
     # Copy any authorized keys from the current user to the cuckoo user.
-    mkdir /home/cuckoo/.ssh
+    mkdir -p /home/cuckoo/.ssh
     cp ~/.ssh/authorized_keys /home/cuckoo/.ssh/authorized_keys
+    chown cuckoo:cuckoo /home/cuckoo/.ssh/authorized_keys
 
     # Add the www-data user to the cuckoo group.
     adduser www-data cuckoo
 
+    # TODO Somehow vmtemp is not properly propagated into the vmcloak
+    # configuration thing, having to run the setup.sh script twice to
+    # actually start creating the bird.
     VMTEMP="$(mktemp -d "/home/cuckoo/tempXXXXXX")"
 
-    # Fetch Cuckoo.
-    git clone git://github.com/cuckoobox/cuckoo.git "$CUCKOO"
-
-    chown -R cuckoo:cuckoo "/home/cuckoo/" "$CUCKOO" "$VMTEMP"
-    chmod 755 "/home/cuckoo/" "$CUCKOO" "$VMTEMP"
+    chown cuckoo:cuckoo "/home/cuckoo/"
+    chown -R cuckoo:cuckoo "$VMTEMP"
+    chmod 755 "/home/cuckoo/" "$VMTEMP"
 
     # Install required packages part two.
-    pip install --upgrade psycopg2 vmcloak -r "$CUCKOO/requirements.txt"
+    pip install --upgrade \
+        psycopg2 vmcloak==0.2.13 -r "/opt/cuckoo/requirements.txt"
+
+    # Clone the Cuckoo repository and initialize it.
+    _clone_cuckoo
 
     # Create a random password.
     # PASSWORD="$(pwgen -1 16)"
@@ -226,12 +305,54 @@ _setup() {
     sql_query "DROP USER cuckoo"
     sql_query "CREATE USER cuckoo WITH PASSWORD '$PASSWORD'"
 
-    # Setup the VirtualBox hostonly network.
-    vmcloak-vboxnet0
+    # Install the Upstart/SystemV scripts.
+    "/opt/cuckoo/utils/service.sh" -c "/opt/cuckoo" install
 
-    # Run the magic iptables script that turns hostonly networks into full
-    # internet access.
-    vmcloak-iptables 192.168.56.1/24 "$INTERFACES"
+    # Add "nmi_watchdog=0" to the GRUB commandline if it's not in there already.
+    if ! grep nmi_watchdog /etc/default/grub; then
+        cat >> /etc/default/grub << EOF
+
+# Add nmi_watchdog=0 to the GRUB commandline to prevent
+# VirtualBox from kernel panicing when the load increases.
+GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT nmi_watchdog=0"
+EOF
+    fi
+
+    # Recreate the GRUB configuration.
+    grub-mkconfig -o /boot/grub/grub.cfg
+
+    # Increase the file descriptor limits. TODO How to set it for just the cuckoo
+    # user? Doesn't seem to work when using 'cuckoo' instead of '*'.
+    if ! grep "* soft nofile" /etc/security/limits.conf; then
+        cat >> /etc/security/limits.conf << EOF
+
+# Set the file descriptor limit fairly high.
+* soft nofile 499999
+* hard nofile 999999
+EOF
+    fi
+
+    # For longterm setups we install the VM provisioning script and cronjob.
+    if [ "$LONGTERM" -ne 0 ]; then
+        CRONJOB="/home/cuckoo/vmprovision.sh"
+
+        # Install the machine cronjob.
+        "/opt/cuckoo/utils/experiment.py" machine-cronjob install \
+            "cpucount=$CPUCOUNT" "path=$CRONJOB" "basedir=$BASEDIR"
+        chown cuckoo:cuckoo "$CRONJOB"
+        chmod +x "$CRONJOB"
+
+        # We want to run the vm provisioning cronjob every five minutes.
+        # Ensure that we only install the cronjob entry once.
+        CRONTAB="$(crontab -u cuckoo -l)"
+        if [[ ! "$CRONTAB" =~ "vmprovision.sh" ]]; then
+            (echo "$CRONTAB" ; echo "*/5 * * * * $CRONJOB")|crontab -u cuckoo -
+        fi
+    fi
+
+    # TODO Should be automated away.
+    echo "PostgreSQL connection string:  " \
+        "postgresql://cuckoo:$PASSWORD@localhost/cuckoo"
 }
 
 _create_virtual_machines() {
@@ -241,7 +362,7 @@ _create_virtual_machines() {
 
     cat > "$VMCLOAKCONF" << EOF
 [vmcloak]
-cuckoo = $CUCKOO
+cuckoo = /opt/cuckoo
 vm-dir = $VMBACKUP
 data-dir = $VMBACKUP
 iso-mount = $MOUNT
@@ -256,9 +377,8 @@ EOF
 
     chown cuckoo:cuckoo "$VMCLOAKCONF"
 
-    # Delete the cuckoo1 machine that is included in the VirtualBox
-    # configuration by default.
-    "$CUCKOO/utils/machine.py" --delete cuckoo1
+    # Ensure that vboxnet0 is up and running.
+    vmcloak-vboxnet0
 
     # Check whether the bird image for this Windows version already exists.
     sudo -u cuckoo -i vmcloak-bird hddpath "${EGGNAME}_bird"
@@ -283,7 +403,7 @@ EOF
 
         # As vmcloak-clone will add an entry for this node we remove it just
         # in case it did already exist.
-        "$CUCKOO/utils/machine.py" --delete "$name"
+        "/opt/cuckoo/utils/machine.py" --delete "$name"
 
         # Delete any remaining files for this Virtual Machine just in case
         # they were still present.
@@ -291,10 +411,16 @@ EOF
 
         echo "Creating Virtual Machine $name.."
         vmcloak-clone -s "$VMCLOAKCONF" -u cuckoo --bird "${EGGNAME}_bird" \
-            --hostonly-ip "192.168.56.$((2+$i))" "$name"
+            --hostonly-ip "192.168.56.$((2+$i))" --cpu-count "$CPUCOUNT" \
+            "$name"
     done
 
     rm -rf "$VMCLOAKCONF" "$VMTEMP"
+
+    # In longterm modes we have a different script that provides VMs for us.
+    if [ "$LONGTERM" -ne 0 ]; then
+        sudo -u cuckoo -i sh "$CRONJOB"
+    fi
 
     # Remove all Virtual Machine related logfiles, we're not interested
     # in keeping those.
@@ -355,8 +481,9 @@ _setup_vmmount() {
 
 _initialize_from_backup() {
     # Initialize our setup from our backup, if available.
+    local tmpfs="$1"
 
-    if [ "$TMPFS" -ne 0 ]; then
+    if [ "$tmpfs" -ne 0 ]; then
         # Initialize a mount with all the files from the backup directory.
         _setup_vmmount "$VMBACKUP" "$VMMOUNT"
 
@@ -369,7 +496,6 @@ _initialize_from_backup() {
 }
 
 # Initialize various variables.
-CUCKOO="/home/cuckoo/cuckoo"
 MOUNT="/mnt/$MOUNTOS/"
 VMS="$BASEDIR/vms/"
 VMBACKUP="$BASEDIR/vmbackup/"
@@ -406,6 +532,8 @@ TAGS="$TAGS"
 INTERFACES="$INTERFACES"
 DEPENDENCIES="$DEPENDENCIES"
 BASEDIR="$BASEDIR"
+LONGTERM="$LONGTERM"
+CPUCOUNT="$CPUCOUNT"
 
 # Values set based on configuration values.
 EGGNAME="$EGGNAME"
@@ -429,45 +557,14 @@ chown cuckoo:cuckoo "$VMS" "$VMBACKUP" "$VMMOUNT"
 
 # In the case of tmpfs support we first setup the vmmount and all that so to
 # recover any VMs that were not actually broken, but were just missing
-# symbolic links and some files copied over.
-_initialize_from_backup
+# symbolic links and some files copied over. At this point, however, we do not
+# setup the entire tmpfs thing yet, though, as that would just require a lot
+# of file copying even though we might have to do this right again after
+# creating new VMs.
+_initialize_from_backup 0
 
 # We then create new VMs if required.
 _create_virtual_machines
 
-# And just in case that resulted in any new VMs, we re-initialize from our
-# backup which now simply contains more VMs.
-_initialize_from_backup
-
-# Install the Upstart/SystemV scripts.
-"$CUCKOO/utils/service.sh" install
-
-# Add "nmi_watchdog=0" to the GRUB commandline if it's not in there already.
-if ! grep nmi_watchdog /etc/default/grub; then
-    cat >> /etc/default/grub << EOF
-
-# Add nmi_watchdog=0 to the GRUB commandline to prevent
-# VirtualBox from kernel panicing when the load increases.
-GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT nmi_watchdog=0"
-EOF
-fi
-
-# Recreate the GRUB configuration.
-grub-mkconfig -o /boot/grub/grub.cfg
-
-# Increase the file descriptor limits. TODO How to set it for just the cuckoo
-# user? Doesn't seem to work when using 'cuckoo' instead of '*'.
-if ! grep "* soft nofile" /etc/security/limits.conf; then
-    cat >> /etc/security/limits.conf << EOF
-
-# Set the file descriptor limit fairly high.
-* soft nofile 40000
-* hard nofile 80000
-EOF
-fi
-
-echo "PostgreSQL connection string:  " \
-    "postgresql://cuckoo:$PASSWORD@localhost/cuckoo"
-
-# A reboot is required for the grub command-line to take effect.
-shutdown -r now
+# Initialize all VMs.
+_initialize_from_backup "$TMPFS"
